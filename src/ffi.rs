@@ -149,6 +149,7 @@ extern "C" {
         dx: c_double,
         dy: c_double,
         tag: c_int,
+        radius: c_double,
         ierr: *mut c_int,
     ) -> c_int;
     pub fn gmshModelOccAddDisk(

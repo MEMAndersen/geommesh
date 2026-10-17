@@ -15,4 +15,8 @@ path = "src/bin/prototype.rs"
 name = "phase2_test"
 path = "src/bin/phase2_test.rs"
 
+[[bin]]
+name = "deep_beam_test"
+path = "src/bin/deep_beam_test.rs"
+
 [workspace]

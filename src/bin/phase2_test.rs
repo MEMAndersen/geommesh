@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         advanced: Vec::new(),
     };
 
-    let mesh = build(&part, &settings)?;
+    let mesh = build(&[part], &settings)?;
 
     println!("\nMesh built successfully:");
     println!("  nodes: {}", mesh.metadata.node_count);
@@ -92,7 +92,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "mesh should have physical groups"
     );
 
-    // Verify node coordinates are reasonable
+    // Verify elements can be retrieved by group name (entity-level lookup)
+    if let Some(element_tags) = mesh.elements_in_group("part_with_hole") {
+        println!(
+            "Elements in 'part_with_hole': {}",
+            element_tags.len()
+        );
+        assert!(!element_tags.is_empty(), "should have elements in part_with_hole");
+    } else {
+        panic!("Expected elements in 'part_with_hole'");
+    }
     for node in &mesh.nodes {
         assert!(
             node.x >= 0.0 && node.x <= 1.0 + 1e-6,

@@ -72,16 +72,18 @@ pub struct MeshMetadata {
 }
 
 /// The mesh returned by `build()`.
+///
+/// Follows the Gmsh `.msh` data model:
+/// - Elements are classified on model entities (dim, tag pairs)
+/// - Physical groups contain entity (dim, tag) pairs
+/// - To find elements in a physical group, look up the group's entities,
+///   then find all elements classified on those entities.
 #[derive(Debug, Clone)]
 pub struct Mesh {
     pub nodes: Vec<Node>,
     pub elements: Vec<Element>,
     pub physical_groups: Vec<PhysicalGroup>,
     pub metadata: MeshMetadata,
-    /// Element tags grouped by physical group name. Built from element
-    /// entity classifications, which are more reliable than
-    /// `gmshModelGetEntitiesForPhysicalGroup` after mesh generation.
-    pub element_groups: HashMap<String, Vec<usize>>,
 }
 
 impl Mesh {
@@ -91,8 +93,36 @@ impl Mesh {
     }
 
     /// All element tags belonging to a physical group by name.
+    ///
+    /// Follows the Gmsh `.msh` model: a physical group contains entity
+    /// (dim, tag) pairs; elements are classified on entities. This method
+    /// finds the group's entities, then returns all elements classified on
+    /// any of those entities.
     pub fn elements_in_group(&self, name: &str) -> Option<Vec<usize>> {
-        self.element_groups.get(name).cloned()
+        let group = self.physical_group(name)?;
+
+        // Build a map from (dim, tag) -> element tags
+        let mut entity_to_elements: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+        for element in &self.elements {
+            entity_to_elements
+                .entry((element.dim, element.entity_tag))
+                .or_default()
+                .push(element.tag);
+        }
+
+        // Collect all element tags for entities in this physical group
+        let mut element_tags: Vec<usize> = Vec::new();
+        for &(dim, tag) in &group.entities {
+            if let Some(tags) = entity_to_elements.get(&(dim, tag)) {
+                element_tags.extend_from_slice(tags);
+            }
+        }
+
+        if element_tags.is_empty() {
+            None
+        } else {
+            Some(element_tags)
+        }
     }
 
     /// All nodes (as flat [x, y, z, ...] array).

@@ -132,6 +132,13 @@ impl Shape {
             }
         }
     }
+
+    /// Convenience method to realize this shape in isolation, creating a new
+    /// `RealizeCtx`. Useful for testing shape realization outside of `build()`.
+    pub fn realize_ffi(&self) -> Result<Vec<DimTag>, RealizeError> {
+        let mut ctx = RealizeCtx::new(self.dimension());
+        self.realize(&mut ctx)
+    }
 }
 
 /// Context maintained during realization of a shape tree into Gmsh.
@@ -157,14 +164,21 @@ impl RealizeCtx {
     }
 
     /// Record dimtags produced by a labeled shape.
+    ///
+    /// Panics if the label has already been used by another shape in the tree.
+    /// Shape labels must be unique so they can be unambiguously mapped to
+    /// physical groups in the resulting mesh.
     pub fn record_label(&mut self, label: &str, dimtags: &[DimTag]) {
         if dimtags.is_empty() {
             return;
         }
-        self.label_map
-            .entry(label.to_string())
-            .or_default()
-            .extend_from_slice(dimtags);
+        if self.label_map.contains_key(label) {
+            panic!(
+                "Duplicate shape label: '{}'. Shape labels must be unique.",
+                label
+            );
+        }
+        self.label_map.insert(label.to_string(), dimtags.to_vec());
         self.all_dimtags.extend_from_slice(dimtags);
     }
 
@@ -245,6 +259,7 @@ impl Realizable for Shape {
                 let dimtags = vec![DimTag { dim: 0, tag }];
                 if let Some(l) = label {
                     ctx.record_label(l, &dimtags);
+                    ctx.name_entity(0, tag, l)?;
                 } else {
                     ctx.record_unlabeled(&dimtags);
                 }
@@ -273,6 +288,7 @@ impl Realizable for Shape {
                 let dimtags = vec![DimTag { dim: 1, tag }];
                 if let Some(l) = label {
                     ctx.record_label(l, &dimtags);
+                    ctx.name_entity(1, tag, l)?;
                 } else {
                     ctx.record_unlabeled(&dimtags);
                 }
@@ -288,6 +304,7 @@ impl Realizable for Shape {
                 let dimtags = vec![DimTag { dim: 1, tag }];
                 if let Some(l) = label {
                     ctx.record_label(l, &dimtags);
+                    ctx.name_entity(1, tag, l)?;
                 } else {
                     ctx.record_unlabeled(&dimtags);
                 }
@@ -298,10 +315,12 @@ impl Realizable for Shape {
                 let [x1, y1] = max;
                 let dx = x1 - x0;
                 let dy = y1 - y0;
+                eprintln!("  realize(): calling gmshModelOccAddRectangle({},{},0,{},{},-1,0)", x0, y0, dx, dy);
                 let mut ierr: ffi::c_int = 0;
                 let tag = unsafe {
-                    ffi::gmshModelOccAddRectangle(*x0, *y0, 0.0, dx, dy, -1, &mut ierr)
+                    ffi::gmshModelOccAddRectangle(*x0, *y0, 0.0, dx, dy, -1, 0.0, &mut ierr)
                 };
+                eprintln!("  realize(): gmshModelOccAddRectangle returned tag={}, ierr={}", tag, ierr);
                 check(ierr)?;
                 // Rectangle returns a surface (dim 2) and its boundary curves
                 // We need to synchronize to get all created entities
@@ -314,6 +333,7 @@ impl Realizable for Shape {
                 let dimtags = vec![DimTag { dim: 2, tag }];
                 if let Some(l) = label {
                     ctx.record_label(l, &dimtags);
+                    ctx.name_entity(2, tag, l)?;
                 } else {
                     ctx.record_unlabeled(&dimtags);
                 }
@@ -332,6 +352,7 @@ impl Realizable for Shape {
                 let dimtags = vec![DimTag { dim: 2, tag }];
                 if let Some(l) = label {
                     ctx.record_label(l, &dimtags);
+                    ctx.name_entity(2, tag, l)?;
                 } else {
                     ctx.record_unlabeled(&dimtags);
                 }
@@ -395,6 +416,7 @@ impl Realizable for Shape {
                 let dimtags = vec![DimTag { dim: 2, tag: surface_tag }];
                 if let Some(l) = label {
                     ctx.record_label(l, &dimtags);
+                    ctx.name_entity(2, surface_tag, l)?;
                 } else {
                     ctx.record_unlabeled(&dimtags);
                 }
@@ -416,6 +438,7 @@ impl Realizable for Shape {
                 let dimtags = vec![DimTag { dim: 3, tag }];
                 if let Some(l) = label {
                     ctx.record_label(l, &dimtags);
+                    ctx.name_entity(3, tag, l)?;
                 } else {
                     ctx.record_unlabeled(&dimtags);
                 }
@@ -435,6 +458,7 @@ impl Realizable for Shape {
                 let dimtags = vec![DimTag { dim: 3, tag }];
                 if let Some(l) = label {
                     ctx.record_label(l, &dimtags);
+                    ctx.name_entity(3, tag, l)?;
                 } else {
                     ctx.record_unlabeled(&dimtags);
                 }
@@ -455,6 +479,7 @@ impl Realizable for Shape {
                 let dimtags = vec![DimTag { dim: 2, tag }];
                 if let Some(l) = label {
                     ctx.record_label(l, &dimtags);
+                    ctx.name_entity(2, tag, l)?;
                 } else {
                     ctx.record_unlabeled(&dimtags);
                 }
@@ -626,6 +651,9 @@ impl Realizable for Shape {
 
                 if let Some(l) = label {
                     ctx.record_label(l, &result);
+                    for dt in &result {
+                        ctx.name_entity(dt.dim, dt.tag, l)?;
+                    }
                 } else {
                     ctx.record_unlabeled(&result);
                 }
@@ -708,5 +736,16 @@ mod tests {
             label: None,
         };
         assert_eq!(b.dimension(), 3);
+    }
+
+    #[test]
+    fn duplicate_label_panics() {
+        let mut ctx = RealizeCtx::new(3);
+        let dt = DimTag { dim: 3, tag: 100 };
+        ctx.record_label("my_label", &[dt]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.record_label("my_label", &[dt]);
+        }));
+        assert!(result.is_err(), "Expected panic on duplicate label");
     }
 }
