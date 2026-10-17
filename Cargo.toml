@@ -1,0 +1,18 @@
+[package]
+name = "geommesh"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[build-dependencies]
+
+[[bin]]
+name = "prototype"
+path = "src/bin/prototype.rs"
+
+[[bin]]
+name = "phase2_test"
+path = "src/bin/phase2_test.rs"
+
+[workspace]

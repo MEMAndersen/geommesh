@@ -1,0 +1,36 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Python / PyO3 / maturin
+*.pyc
+__pycache__/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# Gmsh artifacts
+*.msh
+*.geo
+*.vtk
+*.stl
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Plans (kept in repo)
+.plans/
+
+.sandbox/
