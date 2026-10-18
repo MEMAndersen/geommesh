@@ -288,6 +288,14 @@ extern "C" {
         ierr: *mut c_int,
     ) -> c_int;
 
+    pub fn gmshModelOccAddWire(
+        curve_tags: *const c_int,
+        curve_tags_n: usize,
+        tag: c_int,
+        check_closed: c_int,
+        ierr: *mut c_int,
+    ) -> c_int;
+
     pub fn gmshModelOccAddCurveLoop(
         curve_tags: *const c_int,
         curve_tags_n: usize,

@@ -1,8 +1,15 @@
 //! Shape model: closed enum of 0–3D primitives and boolean compositions.
 //!
-//! Every shape carries an optional `label`. Realization creates OCC entities
-//! in the Gmsh model and records, for each label, the entities it produced.
-//! Labels are turned into Gmsh physical groups by [`crate::builder::build`].
+//! All shapes live in one global (x, y, z) coordinate system, the same one the
+//! generated mesh uses. Every shape carries an optional `label`. Realization
+//! creates OCC entities in the Gmsh model and records, for each label, the
+//! entities it produced. Labels are turned into Gmsh physical groups by
+//! [`crate::builder::build`].
+//!
+//! Planarity of the lower-dimensional shapes: [`Shape::Polygon`] is defined by
+//! its own 3D points and may lie in any plane, while [`Shape::Rectangle`],
+//! [`Shape::Disk`] and [`Shape::Circle`] are axis-aligned in the plane normal
+//! to the global +Z axis (at `z = 0` or `z = center.z` respectively).
 
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -17,7 +24,7 @@ pub enum BooleanOp {
     Union,
     /// Intersection of all operands (n-ary, commutative).
     Intersection,
-    /// Difference: operands[0] − operands[1] − operands[2] … (n-ary).
+    /// Difference: `operands[0] − operands[1] − operands[2]` … (n-ary).
     Difference,
 }
 
@@ -32,38 +39,74 @@ impl std::fmt::Display for BooleanOp {
 }
 
 /// Closed enum of geometry primitives and boolean compositions.
+///
+/// All shapes are defined in the same global coordinate system as the
+/// generated mesh. Every variant carries an optional label: labels must be
+/// unique across a build and become Gmsh physical groups (see
+/// [`crate::builder::build`]).
+///
+/// | Variant | Dim | Geometry |
+/// |---|---|---|
+/// | [`Point`](Shape::Point) | 0 | vertex |
+/// | [`Line`](Shape::Line) | 1 | segment |
+/// | [`Polyline`](Shape::Polyline) | 1 | open or closed polyline |
+/// | [`Circle`](Shape::Circle) | 1 | full circle |
+/// | [`Polygon`](Shape::Polygon) | 2 | planar polygon (any plane) |
+/// | [`Disk`](Shape::Disk) | 2 | disk (XY plane) |
+/// | [`Rectangle`](Shape::Rectangle) | 2 | axis-aligned rectangle (XY plane) |
+/// | [`Sphere`](Shape::Sphere) | 3 | sphere |
+/// | [`Cube`](Shape::Cube) | 3 | axis-aligned box |
+/// | [`Cylinder`](Shape::Cylinder) | 3 | cylinder |
+/// | [`Boolean`](Shape::Boolean) | n | boolean of same-dimension operands |
 #[derive(Debug, Clone)]
 pub enum Shape {
-    /// 0D point.
+    /// 0D point (a vertex at `center`).
     Point {
         center: [f64; 3],
         label: Option<String>,
     },
-    /// 1D line segment between two points.
+    /// 1D line segment between `start` and `end`; any orientation in space.
     Line {
         start: [f64; 3],
         end: [f64; 3],
         label: Option<String>,
     },
-    /// 1D full circle in the plane normal to `z`, centered at `center`.
+    /// 1D polyline through `points`, in order: an open chain, or a closed
+    /// loop when the last point repeats the first.
+    ///
+    /// At least two points are required and consecutive points must be
+    /// distinct. Every segment is a separate OCC edge; adjacent segments share
+    /// their endpoints, so the polyline is conformal within itself.
+    Polyline {
+        points: Vec<[f64; 3]>,
+        label: Option<String>,
+    },
+    /// 1D full circle of radius `radius`, in the plane `z = center.z` (normal
+    /// to the global +Z axis).
     Circle {
         center: [f64; 3],
         radius: f64,
         label: Option<String>,
     },
-    /// 2D polygon in the XY plane (z = 0), given as a list of (x, y) points.
-    /// At least three points are required.
+    /// 2D planar polygon (a face) through `points`, in order.
+    ///
+    /// At least three points are required. The points must be distinct, not
+    /// collinear, and coplanar; this is validated when the shape is realized.
+    /// Unlike [`Shape::Rectangle`] and [`Shape::Disk`], the polygon's plane is
+    /// defined by the points themselves, so it may be anywhere in space.
     Polygon {
-        points: Vec<[f64; 2]>,
+        points: Vec<[f64; 3]>,
         label: Option<String>,
     },
-    /// 2D disk in the XY plane.
+    /// 2D disk of radius `radius`, in the plane `z = center.z` (normal to the
+    /// global +Z axis).
     Disk {
         center: [f64; 3],
         radius: f64,
         label: Option<String>,
     },
-    /// 2D rectangle in the XY plane.
+    /// 2D axis-aligned rectangle spanning `min` to `max` in the XY plane
+    /// (`z = 0`).
     Rectangle {
         min: [f64; 2],
         max: [f64; 2],
@@ -75,7 +118,7 @@ pub enum Shape {
         radius: f64,
         label: Option<String>,
     },
-    /// 3D box / cuboid.
+    /// 3D axis-aligned box spanning `min` to `max`.
     Cube {
         min: [f64; 3],
         max: [f64; 3],
@@ -91,6 +134,11 @@ pub enum Shape {
         label: Option<String>,
     },
     /// Boolean composition of shapes.
+    ///
+    /// All operands must have the same topological dimension. Difference is
+    /// `operands[0] − operands[1] − …`; Union and Intersection are
+    /// commutative. Operands are consumed by the operation: labels attached to
+    /// them disappear, while the label on the boolean itself survives.
     Boolean {
         op: BooleanOp,
         operands: Vec<Shape>,
@@ -104,6 +152,7 @@ impl Shape {
         match self {
             Shape::Point { label, .. } => label.as_deref(),
             Shape::Line { label, .. } => label.as_deref(),
+            Shape::Polyline { label, .. } => label.as_deref(),
             Shape::Circle { label, .. } => label.as_deref(),
             Shape::Polygon { label, .. } => label.as_deref(),
             Shape::Disk { label, .. } => label.as_deref(),
@@ -120,6 +169,7 @@ impl Shape {
         match self {
             Shape::Point { .. } => 0,
             Shape::Line { .. } => 1,
+            Shape::Polyline { .. } => 1,
             Shape::Circle { .. } => 1,
             Shape::Polygon { .. } => 2,
             Shape::Disk { .. } => 2,
@@ -159,6 +209,8 @@ pub struct RealizeCtx {
 }
 
 impl RealizeCtx {
+    /// Create a context for a model of the given topological dimension (the
+    /// maximum dimension over all shapes that will be built).
     pub fn new(model_dim: i32) -> Self {
         Self {
             labels: Vec::new(),
@@ -248,7 +300,16 @@ impl RealizeCtx {
 }
 
 /// Trait for realizing a shape into the Gmsh model.
+///
+/// Implementations create OCC entities with the raw `gmshModelOccAdd*` calls
+/// and must register every entity they create in the [`RealizeCtx`] — labeled
+/// or not — so that the builder can fragment them and map labels onto the
+/// resulting entities.
 pub trait Realizable {
+    /// Create this shape in the current Gmsh model and record it in `ctx`.
+    ///
+    /// Returns the entities this shape produced (for booleans, the result
+    /// entities).
     fn realize(&self, ctx: &mut RealizeCtx) -> Result<Vec<DimTag>, RealizeError>;
 }
 
@@ -435,6 +496,27 @@ fn add_point(x: f64, y: f64, z: f64) -> Result<c_int, RealizeError> {
     Ok(tag)
 }
 
+/// Synchronize, then record and name freshly created OCC entities.
+fn finish_entities(
+    ctx: &mut RealizeCtx,
+    dim: i32,
+    tags: &[c_int],
+    label: &Option<String>,
+) -> Result<Vec<DimTag>, RealizeError> {
+    occ_sync()?;
+    let dimtags: Vec<DimTag> = tags.iter().map(|&tag| (dim, tag)).collect();
+    match label {
+        Some(label) => {
+            ctx.record_label(label, &dimtags);
+            for &(dim, tag) in &dimtags {
+                ctx.name_entity(dim, tag, label)?;
+            }
+        }
+        None => ctx.record_unlabeled(&dimtags),
+    }
+    Ok(dimtags)
+}
+
 /// Synchronize, then record and name a freshly created OCC entity.
 fn finish_entity(
     ctx: &mut RealizeCtx,
@@ -442,16 +524,127 @@ fn finish_entity(
     tag: c_int,
     label: &Option<String>,
 ) -> Result<Vec<DimTag>, RealizeError> {
-    occ_sync()?;
-    let dimtags = vec![(dim, tag)];
-    match label {
-        Some(label) => {
-            ctx.record_label(label, &dimtags);
-            ctx.name_entity(dim, tag, label)?;
-        }
-        None => ctx.record_unlabeled(&dimtags),
+    finish_entities(ctx, dim, std::slice::from_ref(&tag), label)
+}
+
+/// Validate a polygon definition: at least three points, not all collinear,
+/// and coplanar within a small tolerance.
+///
+/// OCC cannot build a planar face from a degenerate or non-planar wire, and
+/// its error message does not say which constraint was violated, so the
+/// constraints are checked here directly.
+fn validate_polygon(points: &[[f64; 3]]) -> Result<(), RealizeError> {
+    if points.len() < 3 {
+        return Err(RealizeError::InvalidShape(format!(
+            "polygon needs at least 3 points, got {}",
+            points.len()
+        )));
     }
-    Ok(dimtags)
+
+    // Find a plane normal from the first pair of edges that is neither
+    // zero-length nor parallel (i.e. not degenerate).
+    let origin = points[0];
+    let normal = 'search: {
+        for i in 1..points.len() {
+            for j in (i + 1)..points.len() {
+                let a = sub(points[i], origin);
+                let b = sub(points[j], origin);
+                let (na, nb) = (norm(a), norm(b));
+                if na <= 0.0 || nb <= 0.0 {
+                    continue; // repeated point
+                }
+                let c = cross(a, b);
+                let nc = norm(c);
+                if nc > 1e-12 * na * nb {
+                    break 'search Some(scale(c, 1.0 / nc));
+                }
+            }
+        }
+        None
+    };
+    let Some(normal) = normal else {
+        return Err(RealizeError::InvalidShape(
+            "polygon points are collinear (they do not define a plane)".into(),
+        ));
+    };
+
+    // The tolerance scales with the polygon's size so that large models are
+    // not rejected because of floating-point noise.
+    let scale = points
+        .iter()
+        .map(|p| norm(sub(*p, origin)))
+        .fold(1.0_f64, f64::max);
+    let tolerance = 1e-7 * scale;
+    for point in points {
+        let distance = dot(sub(*point, origin), normal).abs();
+        if distance > tolerance {
+            return Err(RealizeError::InvalidShape(format!(
+                "polygon is not planar: a point lies {distance} from the \
+                 polygon's plane (tolerance {tolerance})"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate a polyline definition and report whether it is closed.
+///
+/// Returns `Ok(true)` when the last point repeats the first (the polyline
+/// closes back onto itself). At least two points are required and consecutive
+/// points must not coincide.
+fn validate_polyline(points: &[[f64; 3]]) -> Result<bool, RealizeError> {
+    if points.len() < 2 {
+        return Err(RealizeError::InvalidShape(format!(
+            "polyline needs at least 2 points, got {}",
+            points.len()
+        )));
+    }
+
+    // Tolerances scale with the polyline's size.
+    let scale = points
+        .iter()
+        .map(|p| norm(sub(*p, points[0])))
+        .fold(1.0_f64, f64::max);
+    let tolerance = 1e-9 * scale;
+
+    let closed = points.len() >= 3 && norm(sub(points[points.len() - 1], points[0])) <= tolerance;
+    let vertices = if closed {
+        &points[..points.len() - 1]
+    } else {
+        points
+    };
+    for (i, pair) in vertices.windows(2).enumerate() {
+        if norm(sub(pair[1], pair[0])) <= tolerance {
+            return Err(RealizeError::InvalidShape(format!(
+                "polyline segment {i} has identical endpoints (points must be distinct)"
+            )));
+        }
+    }
+    Ok(closed)
+}
+
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn norm(a: [f64; 3]) -> f64 {
+    dot(a, a).sqrt()
+}
+
+fn scale(a: [f64; 3], s: f64) -> [f64; 3] {
+    [a[0] * s, a[1] * s, a[2] * s]
 }
 
 impl Realizable for Shape {
@@ -472,6 +665,36 @@ impl Realizable for Shape {
                 let tag = unsafe { ffi::gmshModelOccAddLine(p0, p1, -1, &mut ierr) };
                 check(ierr)?;
                 finish_entity(ctx, 1, tag, label)
+            }
+
+            Shape::Polyline { points, label } => {
+                let closed = validate_polyline(points)?;
+                // A closed polyline repeats its first point at the end: don't
+                // create a duplicate vertex for it.
+                let vertices = if closed {
+                    &points[..points.len() - 1]
+                } else {
+                    points.as_slice()
+                };
+                let mut point_tags: Vec<c_int> = Vec::with_capacity(vertices.len());
+                for [x, y, z] in vertices {
+                    point_tags.push(add_point(*x, *y, *z)?);
+                }
+                let segment_count = if closed {
+                    point_tags.len()
+                } else {
+                    point_tags.len() - 1
+                };
+                let mut line_tags: Vec<c_int> = Vec::with_capacity(segment_count);
+                for i in 0..segment_count {
+                    let start = point_tags[i];
+                    let end = point_tags[(i + 1) % point_tags.len()];
+                    let mut ierr: c_int = 0;
+                    let tag = unsafe { ffi::gmshModelOccAddLine(start, end, -1, &mut ierr) };
+                    check(ierr)?;
+                    line_tags.push(tag);
+                }
+                finish_entities(ctx, 1, &line_tags, label)
             }
 
             Shape::Circle {
@@ -504,15 +727,10 @@ impl Realizable for Shape {
             }
 
             Shape::Polygon { points, label } => {
-                if points.len() < 3 {
-                    return Err(RealizeError::InvalidShape(format!(
-                        "polygon needs at least 3 points, got {}",
-                        points.len()
-                    )));
-                }
+                validate_polygon(points)?;
                 let mut point_tags: Vec<c_int> = Vec::with_capacity(points.len());
-                for [x, y] in points {
-                    point_tags.push(add_point(*x, *y, 0.0)?);
+                for [x, y, z] in points {
+                    point_tags.push(add_point(*x, *y, *z)?);
                 }
                 let mut line_tags: Vec<c_int> = Vec::with_capacity(point_tags.len());
                 for i in 0..point_tags.len() {
@@ -728,9 +946,15 @@ impl Realizable for Shape {
 /// Error type for shape realization.
 #[derive(Debug)]
 pub enum RealizeError {
+    /// A Gmsh C API call failed.
     Ffi(FfiError),
+    /// An operation produced no entities (e.g. the intersection of disjoint
+    /// shapes, or a difference that removed everything).
     NoResultEntities(String),
+    /// The shape definition is invalid (mismatched boolean operand
+    /// dimensions, non-planar polygon, zero-length cylinder axis, …).
     InvalidShape(String),
+    /// Gmsh reported an error through its own error log.
     Gmsh(String),
 }
 
@@ -863,5 +1087,85 @@ mod tests {
             Err(RealizeError::InvalidShape(_)) => {}
             other => panic!("expected InvalidShape, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn polygon_validation_accepts_planar_points() {
+        // A square in the XY plane.
+        let square = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        assert!(validate_polygon(&square).is_ok());
+
+        // A square in the tilted plane x = y.
+        let tilted = [
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 1.0, 2.0],
+            [0.0, 0.0, 2.0],
+        ];
+        assert!(validate_polygon(&tilted).is_ok());
+    }
+
+    #[test]
+    fn polygon_validation_rejects_bad_input() {
+        // Too few points.
+        assert!(matches!(
+            validate_polygon(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+            Err(RealizeError::InvalidShape(_))
+        ));
+        // Collinear points.
+        assert!(matches!(
+            validate_polygon(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]),
+            Err(RealizeError::InvalidShape(_))
+        ));
+        // The fourth point lifts out of the plane of the first three.
+        assert!(matches!(
+            validate_polygon(&[
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]),
+            Err(RealizeError::InvalidShape(_))
+        ));
+    }
+
+    #[test]
+    fn polyline_validation_detects_open_and_closed() {
+        // Open: three points, two segments.
+        let open = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]];
+        assert!(!validate_polyline(&open).unwrap());
+
+        // Closed: the last point repeats the first.
+        let closed = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ];
+        assert!(validate_polyline(&closed).unwrap());
+    }
+
+    #[test]
+    fn polyline_validation_rejects_bad_input() {
+        // Too few points.
+        assert!(matches!(
+            validate_polyline(&[[0.0, 0.0, 0.0]]),
+            Err(RealizeError::InvalidShape(_))
+        ));
+        // A zero-length segment.
+        assert!(matches!(
+            validate_polyline(&[
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+            ]),
+            Err(RealizeError::InvalidShape(_))
+        ));
     }
 }

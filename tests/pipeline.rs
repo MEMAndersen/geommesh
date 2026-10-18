@@ -286,6 +286,60 @@ fn labeled_surface_splits_into_multiple_entities() {
 }
 
 #[test]
+fn polyline_embedded_in_a_cube() {
+    // An open, bent polyline inside a volume: fragment embeds each segment.
+    let body = cube([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], "body");
+    let path = Shape::Polyline {
+        points: vec![[0.0, 0.0, 0.0], [0.5, 0.5, 0.5], [1.0, 1.0, 0.0]],
+        label: Some("path".into()),
+    };
+
+    let mesh = build(&[body, path], &settings()).expect("build failed");
+
+    let group = mesh.physical_group("path").expect("missing 'path'");
+    assert_eq!(group.dim, 1);
+    assert_eq!(group.entities.len(), 2, "two segments should survive");
+    assert!(!mesh.elements_in_group("path").unwrap().is_empty());
+
+    // The embedded polyline does not disturb the volume.
+    let volume = group_measure(&mesh, "body");
+    assert!((volume - 1.0).abs() < 0.02, "volume is {volume}");
+}
+
+#[test]
+fn closed_polyline_imprints_on_a_surface() {
+    // A closed square polyline lying on a disk splits the disk in two, while
+    // the polyline itself stays four line segments.
+    let disk = Shape::Disk {
+        center: [0.0, 0.0, 0.0],
+        radius: 2.0,
+        label: Some("disk".into()),
+    };
+    let loop_shape = Shape::Polyline {
+        points: vec![
+            [-1.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [-1.0, 1.0, 0.0],
+            [-1.0, -1.0, 0.0], // closing point repeats the first
+        ],
+        label: Some("loop".into()),
+    };
+
+    let mesh = build(&[disk, loop_shape], &settings()).expect("build failed");
+
+    let loop_group = mesh.physical_group("loop").expect("missing 'loop'");
+    assert_eq!(loop_group.dim, 1);
+    assert_eq!(loop_group.entities.len(), 4, "four segments form the loop");
+    assert!(!mesh.elements_in_group("loop").unwrap().is_empty());
+
+    let disk_group = mesh.physical_group("disk").expect("missing 'disk'");
+    assert_eq!(disk_group.dim, 2);
+    // The loop cuts the disk into the square and the surrounding region.
+    assert_eq!(disk_group.entities.len(), 2);
+}
+
+#[test]
 fn exported_msh_reopens_in_gmsh() {
     let shape = cube([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], "block");
     let mesh = build(&[shape], &settings()).expect("build failed");

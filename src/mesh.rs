@@ -11,7 +11,9 @@ use crate::ffi::{self, DimTag, FfiError};
 /// A mesh node: unique tag + (x, y, z) coordinates.
 #[derive(Debug, Clone)]
 pub struct Node {
+    /// Node tag, as referenced by element connectivity.
     pub tag: usize,
+    /// Coordinates in the model's global coordinate system.
     pub x: f64,
     pub y: f64,
     pub z: f64,
@@ -20,26 +22,47 @@ pub struct Node {
 /// Gmsh element type codes (subset of the full Gmsh element type registry).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElementType {
+    /// 2-node line segment (1D).
     Line,
+    /// 3-node triangle (2D).
     Tri,
+    /// 4-node quadrilateral (2D).
     Quad,
+    /// 4-node tetrahedron (3D).
     Tetra,
+    /// 8-node hexahedron (3D).
     Hexa,
+    /// 6-node prism (3D).
     Prism,
+    /// 5-node pyramid (3D).
     Pyramid,
+    /// 3-node line segment (quadratic).
     Line3,
+    /// 6-node triangle (quadratic).
     Tri6,
+    /// 9-node quadrilateral (quadratic).
     Quad9,
+    /// 10-node tetrahedron (quadratic).
     Tetra10,
+    /// 27-node hexahedron (quadratic).
     Hexa27,
+    /// 18-node prism (quadratic).
     Prism18,
+    /// 14-node pyramid (quadratic).
     Pyramid14,
+    /// 1-node point (0D).
     Vertex,
+    /// 8-node quadrilateral (serendipity).
     Quad8,
+    /// 20-node hexahedron (serendipity).
     Hexa20,
+    /// 15-node prism (serendipity).
     Prism15,
+    /// 13-node pyramid (serendipity).
     Pyramid13,
+    /// 9-node triangle (Gmsh type 20).
     Tri9,
+    /// 10-node triangle (Gmsh type 21).
     Tri10,
     /// Any element type not listed above, keeping its Gmsh type code.
     Unknown(i32),
@@ -135,18 +158,26 @@ impl From<i32> for ElementType {
 /// A mesh element: type, node tags, and the Gmsh entity it belongs to.
 #[derive(Debug, Clone)]
 pub struct Element {
+    /// Element tag.
     pub tag: usize,
+    /// Element type (shape and order).
     pub element_type: ElementType,
+    /// Node tags, in the connectivity order Gmsh defines for this type.
     pub node_tags: Vec<usize>,
+    /// Dimension of the model entity this element was meshed on.
     pub dim: i32,
+    /// Tag of the model entity this element was meshed on.
     pub entity_tag: i32,
 }
 
 /// A physical group: name, dimension, Gmsh tag, and associated entities.
 #[derive(Debug, Clone)]
 pub struct PhysicalGroup {
+    /// Group name (the label of the shape it came from).
     pub name: String,
+    /// Topological dimension of the group.
     pub dim: i32,
+    /// Gmsh tag of the physical group.
     pub tag: i32,
     /// The model entities that belong to this group, as `(dim, entity_tag)`.
     pub entities: Vec<(i32, i32)>,
@@ -155,11 +186,16 @@ pub struct PhysicalGroup {
 /// Mesh metadata.
 #[derive(Debug, Clone)]
 pub struct MeshMetadata {
+    /// Version of the Gmsh kernel used to generate the mesh.
     pub gmsh_version: String,
+    /// Number of nodes (same as `mesh.nodes.len()`).
     pub node_count: usize,
+    /// Number of elements (same as `mesh.elements.len()`).
     pub element_count: usize,
+    /// Number of physical groups (same as `mesh.physical_groups.len()`).
     pub physical_group_count: usize,
-    pub bounding_box: Option<[f64; 6]>, // [xmin, ymin, zmin, xmax, ymax, zmax]
+    /// Bounding box as `[xmin, ymin, zmin, xmax, ymax, zmax]`.
+    pub bounding_box: Option<[f64; 6]>,
 }
 
 /// The mesh returned by `build()`.
@@ -171,9 +207,13 @@ pub struct MeshMetadata {
 ///   then find all elements classified on those entities.
 #[derive(Debug, Clone)]
 pub struct Mesh {
+    /// Mesh nodes.
     pub nodes: Vec<Node>,
+    /// Mesh elements, in per-entity read order.
     pub elements: Vec<Element>,
+    /// One physical group per label and dimension.
     pub physical_groups: Vec<PhysicalGroup>,
+    /// Counts, Gmsh version and bounding box.
     pub metadata: MeshMetadata,
 }
 
@@ -201,6 +241,8 @@ impl Mesh {
     /// (dim, tag) pairs; elements are classified on entities. This method
     /// finds the group's entities, then returns all elements classified on
     /// any of those entities.
+    ///
+    /// Returns `None` if no group has that name or the group has no elements.
     pub fn elements_in_group(&self, name: &str) -> Option<Vec<usize>> {
         let mut group_entities: Vec<(i32, i32)> = Vec::new();
         for group in self.physical_groups_named(name) {
@@ -321,8 +363,11 @@ impl Mesh {
 /// Error type for mesh operations.
 #[derive(Debug)]
 pub enum MeshError {
+    /// A Gmsh C API call failed.
     Ffi(FfiError),
+    /// A file operation failed.
     Io(String),
+    /// Gmsh reported an error through its own error log.
     Gmsh(String),
 }
 

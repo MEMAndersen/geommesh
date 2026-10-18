@@ -12,18 +12,25 @@ use crate::geometry::{self, Realizable, RealizeCtx, RealizeError, Shape};
 use crate::mesh::{self, Mesh, MeshError, MeshMetadata, PhysicalGroup};
 
 /// Meshing settings exposed to users.
+///
+/// These map onto Gmsh options; anything else can be set through
+/// [`MeshSettings::advanced`].
 #[derive(Debug, Clone)]
 pub struct MeshSettings {
-    /// Target characteristic element size (hint; Gmsh may deviate).
+    /// Target characteristic element size. Sets both
+    /// `Mesh.CharacteristicLengthMin` and `Mesh.CharacteristicLengthMax`;
+    /// Gmsh may still deviate from it.
     pub characteristic_length: Option<f64>,
     /// Mesh element order: 1 = linear, 2 = quadratic.
     pub order: u8,
-    /// Run mesh optimization after generation.
+    /// Run the Gmsh mesh optimizer after generation (on by default).
     pub optimize: bool,
-    /// Gmsh 2D meshing algorithm code (e.g. 5 = Delaunay, 6 = Frontal).
-    /// See the Gmsh documentation for `Mesh.Algorithm`.
+    /// Gmsh 2D meshing algorithm code (`Mesh.Algorithm`), e.g. 5 = Delaunay,
+    /// 6 = Frontal-Delaunay. See the Gmsh reference manual. The 3D algorithm
+    /// can be set through `advanced` (`("Mesh.Algorithm3D", 10.0)`).
     pub algorithm: Option<i32>,
-    /// Advanced options passed through to Gmsh as `"Category.Option" = value`.
+    /// Extra Gmsh options, set verbatim as number options before meshing,
+    /// e.g. `("Mesh.Algorithm3D", 10.0)`.
     pub advanced: Vec<(String, f64)>,
 }
 
@@ -115,10 +122,15 @@ impl Drop for GmshContext {
 /// Error type for the builder.
 #[derive(Debug)]
 pub enum BuildError {
+    /// A Gmsh C API call failed.
     Ffi(FfiError),
+    /// Reading back the generated mesh failed.
     Mesh(MeshError),
+    /// A shape could not be realized (see [`RealizeError`]).
     Geometry(RealizeError),
+    /// The arguments to `build` were invalid (empty slice, no entities, …).
     InvalidArgument(String),
+    /// A string conversion or file operation failed.
     Io(String),
 }
 
@@ -169,6 +181,31 @@ impl From<std::ffi::NulError> for BuildError {
 ///   mesh has conformal interfaces.
 /// * Labels on entities consumed by a boolean operation disappear (their
 ///   entities no longer exist); labels on boolean results survive.
+///
+/// Gmsh is a process-wide singleton: calls to `build` are serialized
+/// internally, so this function can safely be called from several threads
+/// (concurrent builds queue up).
+///
+/// # Errors
+///
+/// Returns [`BuildError`] if `shapes` is empty or produces no entities, if a
+/// shape cannot be realized (bad dimensions, invalid polygon, …), if a Gmsh
+/// call fails, or if the mesh cannot be generated.
+///
+/// # Examples
+///
+/// ```no_run
+/// use geommesh::{build, MeshSettings, Shape};
+///
+/// let cube = Shape::Cube {
+///     min: [0.0, 0.0, 0.0],
+///     max: [1.0, 1.0, 1.0],
+///     label: Some("cube".into()),
+/// };
+/// let mesh = build(&[cube], &MeshSettings::default())?;
+/// assert!(mesh.physical_group("cube").is_some());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn build(shapes: &[Shape], settings: &MeshSettings) -> Result<Mesh, BuildError> {
     if shapes.is_empty() {
         return Err(BuildError::InvalidArgument(
@@ -286,7 +323,7 @@ pub fn build(shapes: &[Shape], settings: &MeshSettings) -> Result<Mesh, BuildErr
     })
 }
 
-/// Convenience wrapper: build a single shape with default settings.
+/// Convenience wrapper: build a single shape with [`MeshSettings::default`].
 pub fn build_default(shape: &Shape) -> Result<Mesh, BuildError> {
     build(std::slice::from_ref(shape), &MeshSettings::default())
 }

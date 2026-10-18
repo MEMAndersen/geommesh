@@ -19,6 +19,7 @@ fn with_label(mut shape: Shape, name: &str) -> Shape {
     match &mut shape {
         Shape::Point { label: l, .. }
         | Shape::Line { label: l, .. }
+        | Shape::Polyline { label: l, .. }
         | Shape::Circle { label: l, .. }
         | Shape::Polygon { label: l, .. }
         | Shape::Disk { label: l, .. }
@@ -51,6 +52,14 @@ fn primitives() -> Vec<(&'static str, Shape)> {
             },
         ),
         (
+            "polyline",
+            Shape::Polyline {
+                // Open, bent, out of the XY plane: two 3D segments.
+                points: vec![[0.0, 0.0, 0.0], [0.5, 0.0, 0.5], [0.5, 1.0, 0.5]],
+                label: None,
+            },
+        ),
+        (
             "circle",
             Shape::Circle {
                 center: [0.0, 0.0, 0.0],
@@ -61,7 +70,13 @@ fn primitives() -> Vec<(&'static str, Shape)> {
         (
             "polygon",
             Shape::Polygon {
-                points: vec![[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]],
+                // A square in the vertical XZ plane: exercises 3D points.
+                points: vec![
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [1.0, 0.0, 1.0],
+                    [0.0, 0.0, 1.0],
+                ],
                 label: None,
             },
         ),
@@ -138,21 +153,30 @@ fn every_primitive_realizes_standalone() {
             .realize(&mut ctx)
             .unwrap_or_else(|e| panic!("realize failed for {name}: {e}"));
 
+        // Every primitive realizes to one entity, except a polyline, which is
+        // made of one edge per segment.
+        let expected = match &shape {
+            Shape::Polyline { points, .. } => points.len() - 1,
+            _ => 1,
+        };
         assert_eq!(
             dimtags.len(),
-            1,
-            "{name} should realize to exactly one OCC entity, got {dimtags:?}"
+            expected,
+            "{name} should realize to {expected} OCC entities, got {dimtags:?}"
         );
-        let (dim, tag) = dimtags[0];
-        assert_eq!(dim, shape.dimension(), "wrong dimension for {name}");
-        assert!(tag > 0, "invalid tag {tag} for {name}");
+        for &(dim, tag) in &dimtags {
+            assert_eq!(dim, shape.dimension(), "wrong dimension for {name}");
+            assert!(tag > 0, "invalid tag {tag} for {name}");
+        }
 
         occ_sync().unwrap_or_else(|e| panic!("occ_sync failed for {name}: {e}"));
         let entities = mesh::get_entities().unwrap_or_else(|e| panic!("get_entities failed: {e}"));
-        assert!(
-            entities.contains(&(dim, tag)),
-            "{name} ({dim}, {tag}) missing from the model: {entities:?}"
-        );
+        for &(dim, tag) in &dimtags {
+            assert!(
+                entities.contains(&(dim, tag)),
+                "{name} ({dim}, {tag}) missing from the model: {entities:?}"
+            );
+        }
     }
 }
 
