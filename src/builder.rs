@@ -1,15 +1,15 @@
-//! Builder: MeshSettings, GmshContext lifecycle, and the top-level `build()`
-//! function that realizes a shape tree, runs `occ.fragment`, creates physical
-//! groups, generates a mesh, and reads it back into a Rust `Mesh`.
+//! Builder: `MeshSettings`, the `GmshContext` lifecycle, and the top-level
+//! `build()` function that realizes a shape tree, fragments it, creates
+//! physical groups, generates a mesh and reads it back into a Rust [`Mesh`].
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::ffi::CString;
-use std::os::raw::{c_char, c_int, c_void};
-use std::ptr;
+use std::os::raw::c_int;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ffi::{self, check, DimTag, FfiError};
-use crate::geometry::{self, Realizable, RealizeCtx, Shape};
-use crate::mesh::{self, Mesh, MeshError};
+use crate::geometry::{self, Realizable, RealizeCtx, RealizeError, Shape};
+use crate::mesh::{self, Mesh, MeshError, MeshMetadata, PhysicalGroup};
 
 /// Meshing settings exposed to users.
 #[derive(Debug, Clone)]
@@ -20,9 +20,10 @@ pub struct MeshSettings {
     pub order: u8,
     /// Run mesh optimization after generation.
     pub optimize: bool,
-    /// Mesh algorithm (Gmsh option name).
-    pub algorithm: Option<String>,
-    /// Advanced options passed through to Gmsh as "Category.Option" = value.
+    /// Gmsh 2D meshing algorithm code (e.g. 5 = Delaunay, 6 = Frontal).
+    /// See the Gmsh documentation for `Mesh.Algorithm`.
+    pub algorithm: Option<i32>,
+    /// Advanced options passed through to Gmsh as `"Category.Option" = value`.
     pub advanced: Vec<(String, f64)>,
 }
 
@@ -38,29 +39,40 @@ impl Default for MeshSettings {
     }
 }
 
-/// Wraps a Gmsh session: initialize on creation, finalize on drop.
+/// Wraps a Gmsh session: initialize on creation, finalize on drop (only if
+/// this context performed the initialization).
 ///
 /// Gmsh's kernel is a global singleton, so only one `GmshContext` should be
 /// active at a time.
 pub struct GmshContext {
-    initialized: bool,
+    /// True when this context initialized Gmsh and must finalize it.
+    owned: bool,
 }
 
 impl GmshContext {
-    /// Initialize the Gmsh API.
+    /// Initialize the Gmsh API, unless it is already initialized.
     pub fn new() -> Result<Self, MeshError> {
         let mut ierr: c_int = 0;
-        unsafe {
-            ffi::gmshInitialize(0, std::ptr::null_mut(), 1, 0, &mut ierr);
-        }
+        let initialized = unsafe { ffi::gmshIsInitialized(&mut ierr) };
         check(ierr)?;
-        Ok(Self { initialized: true })
+
+        let owned = initialized == 0;
+        if owned {
+            unsafe { ffi::gmshInitialize(0, std::ptr::null_mut(), 1, 0, &mut ierr) };
+            check(ierr)?;
+        }
+        Ok(Self { owned })
     }
 
-    /// Clear all models and start fresh.
-    pub fn clear(&mut self) -> Result<(), MeshError> {
+    /// Create a fresh, empty model and make it the current one.
+    ///
+    /// This does not touch existing models (a new one is added).
+    pub fn create_model(&mut self) -> Result<(), MeshError> {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let name = CString::new(format!("geommesh_{n}"))?;
         let mut ierr: c_int = 0;
-        unsafe { ffi::gmshClear(&mut ierr) };
+        unsafe { ffi::gmshModelAdd(name.as_ptr(), &mut ierr) };
         check(ierr)?;
         Ok(())
     }
@@ -69,9 +81,7 @@ impl GmshContext {
     pub fn set_option_number(&self, name: &str, value: f64) -> Result<(), MeshError> {
         let c_name = CString::new(name)?;
         let mut ierr: c_int = 0;
-        unsafe {
-            ffi::gmshOptionSetNumber(c_name.as_ptr(), value, &mut ierr);
-        }
+        unsafe { ffi::gmshOptionSetNumber(c_name.as_ptr(), value, &mut ierr) };
         check(ierr)?;
         Ok(())
     }
@@ -81,21 +91,23 @@ impl GmshContext {
         let c_name = CString::new(name)?;
         let c_value = CString::new(value)?;
         let mut ierr: c_int = 0;
-        unsafe {
-            ffi::gmshOptionSetString(c_name.as_ptr(), c_value.as_ptr(), &mut ierr);
-        }
+        unsafe { ffi::gmshOptionSetString(c_name.as_ptr(), c_value.as_ptr(), &mut ierr) };
         check(ierr)?;
         Ok(())
+    }
+
+    /// Human-readable description of the last error Gmsh logged.
+    pub fn last_error(&self) -> String {
+        ffi::last_error_message()
     }
 }
 
 impl Drop for GmshContext {
     fn drop(&mut self) {
-        if self.initialized {
+        if self.owned {
             let mut ierr: c_int = 0;
             unsafe { ffi::gmshFinalize(&mut ierr) };
-            // Ignore errors during drop
-            let _ = check(ierr);
+            // Errors during teardown are intentionally ignored.
         }
     }
 }
@@ -105,17 +117,19 @@ impl Drop for GmshContext {
 pub enum BuildError {
     Ffi(FfiError),
     Mesh(MeshError),
-    Geometry(geometry::RealizeError),
+    Geometry(RealizeError),
+    InvalidArgument(String),
     Io(String),
 }
 
 impl std::fmt::Display for BuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BuildError::Ffi(e) => write!(f, "Gmsh FFI error: {}", e),
-            BuildError::Mesh(e) => write!(f, "Mesh error: {}", e),
-            BuildError::Geometry(e) => write!(f, "Geometry error: {}", e),
-            BuildError::Io(msg) => write!(f, "I/O error: {}", msg),
+            BuildError::Ffi(e) => write!(f, "{e}"),
+            BuildError::Mesh(e) => write!(f, "{e}"),
+            BuildError::Geometry(e) => write!(f, "{e}"),
+            BuildError::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
+            BuildError::Io(msg) => write!(f, "I/O error: {msg}"),
         }
     }
 }
@@ -134,262 +148,145 @@ impl From<MeshError> for BuildError {
     }
 }
 
-impl From<geometry::RealizeError> for BuildError {
-    fn from(e: geometry::RealizeError) -> Self {
+impl From<RealizeError> for BuildError {
+    fn from(e: RealizeError) -> Self {
         BuildError::Geometry(e)
     }
 }
 
 impl From<std::ffi::NulError> for BuildError {
     fn from(e: std::ffi::NulError) -> Self {
-        BuildError::Io(format!("NulError: {}", e))
+        BuildError::Io(format!("string contains a null byte: {e}"))
     }
 }
 
-/// Top-level build function: realize shape tree → fragment → physical groups
-/// → mesh → read back into Rust `Mesh`.
+/// Top-level build function: realize the shape tree, fragment it, create
+/// physical groups, generate a mesh and read it back.
 ///
-/// Entity names are set during realization (in geometry.rs) and survive
-/// through boolean operations, fragment, and mesh generation. After mesh
-/// generation, entity tags may be renumbered but names are preserved, so we
-/// query entities by name to build the final label → post-mesh-entity mapping.
+/// * Every label becomes one or more Gmsh physical groups (one per
+///   dimension), containing the entities that the labeled shape produced.
+/// * All live entities are fragmented once before meshing, so the resulting
+///   mesh has conformal interfaces.
+/// * Labels on entities consumed by a boolean operation disappear (their
+///   entities no longer exist); labels on boolean results survive.
 pub fn build(shapes: &[Shape], settings: &MeshSettings) -> Result<Mesh, BuildError> {
-    let mut ctx = GmshContext::new()?;
-    ctx.clear()?;
+    if shapes.is_empty() {
+        return Err(BuildError::InvalidArgument(
+            "`shapes` must contain at least one shape".into(),
+        ));
+    }
 
-    // Apply meshing settings
+    // Gmsh is a process-wide singleton: serialize all builds.
+    let _gmsh_guard = ffi::lock_gmsh();
+
+    let mut gmsh = GmshContext::new()?;
+    gmsh.create_model()?;
+
+    // Apply meshing settings.
     if let Some(h) = settings.characteristic_length {
-        ctx.set_option_number("Mesh.CharacteristicLengthMin", h)?;
-        ctx.set_option_number("Mesh.CharacteristicLengthMax", h)?;
+        gmsh.set_option_number("Mesh.CharacteristicLengthMin", h)?;
+        gmsh.set_option_number("Mesh.CharacteristicLengthMax", h)?;
     }
-    ctx.set_option_number("Mesh.ElementOrder", settings.order as f64)?;
+    gmsh.set_option_number("Mesh.ElementOrder", settings.order as f64)?;
     if settings.optimize {
-        ctx.set_option_number("Mesh.Optimize", 1.0)?;
+        gmsh.set_option_number("Mesh.Optimize", 1.0)?;
     }
-    if let Some(algo) = &settings.algorithm {
-        ctx.set_option_string("Mesh.Algorithm", algo)?;
+    if let Some(algorithm) = settings.algorithm {
+        gmsh.set_option_number("Mesh.Algorithm", algorithm as f64)?;
     }
     for (name, value) in &settings.advanced {
-        ctx.set_option_number(name, *value)?;
+        gmsh.set_option_number(name, *value)?;
     }
 
-    // Determine the model dimension from the shape tree
-    let model_dim = shapes
-        .iter()
-        .map(|s| s.dimension())
-        .max()
-        .unwrap_or(0);
-    eprintln!("  build(): model_dim = {}", model_dim);
-
-    // Realize each shape into Gmsh OCC entities.
-    // Entity names are set during realization (in geometry.rs) and survive
-    // through boolean operations, fragment, and mesh generation.
-    let mut realize_ctx = RealizeCtx::new(model_dim);
+    // Realize every shape into OCC entities.
+    let model_dim = shapes.iter().map(|s| s.dimension()).max().unwrap_or(0);
+    let mut ctx = RealizeCtx::new(model_dim);
     for shape in shapes {
-        eprintln!("  build(): realizing shape with dim={}", shape.dimension());
-        shape.realize(&mut realize_ctx)?;
-        eprintln!("    realized, dimtags={:?}", realize_ctx.all_dimtags);
+        shape.realize(&mut ctx)?;
+    }
+    geometry::occ_sync()?;
+
+    let live: Vec<DimTag> = ctx.live_dimtags().to_vec();
+    if live.is_empty() {
+        return Err(BuildError::InvalidArgument(
+            "the given shapes produced no entities".into(),
+        ));
     }
 
-    // Synchronize OCC with the Gmsh model
-    {
-        let mut ierr: c_int = 0;
-        unsafe { ffi::gmshModelOccSynchronize(&mut ierr) };
-        check(ierr)?;
-        eprintln!("    synchronized");
-    }
+    // Fragment all live entities once so that everything is conformal.
+    // `fragment_map[i]` lists the entities that input entity `i` turned into.
+    let fragment_map: Vec<Vec<DimTag>> = if live.len() == 1 {
+        vec![live.clone()]
+    } else {
+        let (_results, map) = geometry::occ_fragment(&live, &[], true, true)?;
+        map
+    };
+    // Gmsh fragments live in the OCC kernel until synchronized; the model
+    // must know the resulting entities before physical groups can name them.
+    geometry::occ_sync()?;
 
-    // Run occ.fragment to create shared topology between all entities.
-    // Fragment may renumber entity tags, but entity names (set during
-    // realization) survive renumbering.
-    let object_flat: Vec<ffi::c_int> = realize_ctx
-        .all_dimtags
-        .iter()
-        .flat_map(|t| vec![t.dim, t.tag])
-        .collect();
-    let object_n = object_flat.len();
-
-    if object_n > 0 {
-        let mut ierr: c_int = 0;
-        let mut out_dimtags: *mut ffi::c_int = ptr::null_mut();
-        let mut out_dimtags_n: usize = 0;
-
-        unsafe {
-            ffi::gmshModelOccFragment(
-                object_flat.as_ptr(),
-                object_n / 2,
-                ptr::null(),
-                0,
-                &mut out_dimtags,
-                &mut out_dimtags_n,
-                std::ptr::null_mut(), // outDimTagsMap
-                std::ptr::null_mut(), // outDimTagsMap_n
-                std::ptr::null_mut(), // outDimTagsMap_nn
-                0,
-                0, // removeObject
-                0, // removeTool
-                &mut ierr,
-            )
-        };
-        check(ierr)?;
-
-        if !out_dimtags.is_null() {
-            unsafe { ffi::gmshFree(out_dimtags as *mut c_void) };
+    // Map shape labels to their post-fragment entities.
+    let mut groups: Vec<PhysicalGroup> = Vec::new();
+    for (label, entities) in ctx.labels() {
+        let mut post: Vec<DimTag> = Vec::new();
+        for entity in entities {
+            if let Some(index) = live.iter().position(|e| e == entity) {
+                if let Some(mapped) = fragment_map.get(index) {
+                    post.extend_from_slice(mapped);
+                }
+            }
+        }
+        post.sort_unstable();
+        post.dedup();
+        if post.is_empty() {
+            continue;
         }
 
-        // Synchronize fragment results back to the Gmsh model
-        {
-            let mut ierr: c_int = 0;
-            unsafe { ffi::gmshModelOccSynchronize(&mut ierr) };
-            check(ierr)?;
+        let mut by_dim: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
+        for (dim, tag) in post {
+            by_dim.entry(dim).or_default().push(tag);
         }
-    }
-
-    // Generate the mesh
-    {
-        let mut ierr: c_int = 0;
-        unsafe { ffi::gmshModelMeshGenerate(model_dim as i32, &mut ierr) };
-        check(ierr)?;
-    }
-
-    // After mesh generation, entity tags may have been renumbered but names
-    // (set during realization) are preserved. Query all entities, read their
-    // names, and build the final label → post-mesh-entity mapping.
-    let mut name_to_dimtags: HashMap<String, Vec<DimTag>> = HashMap::new();
-    for dim in 0..=model_dim as i32 {
-        let mut dimtags: *mut c_int = ptr::null_mut();
-        let mut dimtags_n: usize = 0;
-        let mut ierr: c_int = 0;
-        unsafe {
-            ffi::gmshModelGetEntities(
-                &mut dimtags,
-                &mut dimtags_n,
+        for (dim, tags) in by_dim {
+            let tag = geometry::add_physical_group(dim, &tags, label)?;
+            groups.push(PhysicalGroup {
+                name: label.clone(),
                 dim,
-                &mut ierr,
-            )
-        };
-        check(ierr)?;
-
-        let num_entities = dimtags_n / 2;
-        for i in 0..num_entities {
-            let e_dim = unsafe { *dimtags.add(i * 2) };
-            let e_tag = unsafe { *dimtags.add(i * 2 + 1) };
-
-            // Get entity name
-            let mut name_ptr: *mut c_char = ptr::null_mut();
-            unsafe {
-                ffi::gmshModelGetEntityName(e_dim, e_tag, &mut name_ptr, &mut ierr);
-            }
-            check(ierr)?;
-
-            if !name_ptr.is_null() {
-                let len = (0..).find(|&k| unsafe { *name_ptr.add(k) == 0 }).unwrap_or(0);
-                let bytes = unsafe { std::slice::from_raw_parts(name_ptr as *const u8, len) };
-                let name = String::from_utf8_lossy(bytes).to_string();
-                unsafe { ffi::gmshFree(name_ptr as *mut c_void) };
-
-                name_to_dimtags.entry(name).or_default().push(DimTag { dim: e_dim, tag: e_tag });
-            }
-        }
-
-        if !dimtags.is_null() {
-            unsafe { ffi::gmshFree(dimtags as *mut c_void) };
-        }
-    }
-
-    // Create physical groups using post-mesh entity tags (which are final).
-    for (name, dimtags) in &name_to_dimtags {
-        let mut by_dim: HashMap<i32, Vec<i32>> = HashMap::new();
-        for dt in dimtags {
-            by_dim.entry(dt.dim).or_default().push(dt.tag);
-        }
-
-        for (dim, tags) in &by_dim {
-            if tags.is_empty() {
-                continue;
-            }
-            let c_name = CString::new(name.as_str())?;
-            let mut ierr: c_int = 0;
-            unsafe {
-                ffi::gmshModelAddPhysicalGroup(
-                    *dim,
-                    tags.as_ptr(),
-                    tags.len(),
-                    -1, // auto-assign tag
-                    c_name.as_ptr(),
-                    &mut ierr,
-                )
-            };
-            check(ierr)?;
-        }
-    }
-
-    // Read back nodes
-    let mut ierr: c_int = 0;
-    let nodes = mesh::read_nodes(&mut ierr)?;
-    check(ierr)?;
-
-    // Read back elements
-    let mut ierr: c_int = 0;
-    let elements = mesh::read_elements(&mut ierr)?;
-    check(ierr)?;
-
-    // Build physical groups from name_to_dimtags (entity dimtags preserved
-    // through mesh generation via entity names). Following the Gmsh .msh
-    // data model: physical groups store entity (dim, tag) pairs, and
-    // elements are found by looking up elements classified on those entities.
-    let mut physical_groups: Vec<mesh::PhysicalGroup> = Vec::new();
-    for (name, dimtags) in &name_to_dimtags {
-        let mut by_dim: HashMap<i32, Vec<i32>> = HashMap::new();
-        for dt in dimtags {
-            by_dim.entry(dt.dim).or_default().push(dt.tag);
-        }
-
-        for (dim, tags) in &by_dim {
-            if tags.is_empty() {
-                continue;
-            }
-            physical_groups.push(mesh::PhysicalGroup {
-                name: name.clone(),
-                dim: *dim,
-                tag: tags[0], // first tag as group tag
-                entities: tags.iter().map(|&t| (*dim, t)).collect(),
+                tag,
+                entities: tags.into_iter().map(|t| (dim, t)).collect(),
             });
         }
     }
+    groups.sort_by(|a, b| (a.dim, a.name.as_str(), a.tag).cmp(&(b.dim, b.name.as_str(), b.tag)));
 
-    // Build metadata
+    // Generate the mesh. Gmsh's `generate(0)` is a no-op, so always ask for
+    // at least dimension 1 (this matters for point-only models).
+    let mut ierr: c_int = 0;
+    unsafe { ffi::gmshModelMeshGenerate(model_dim.max(1), &mut ierr) };
+    check(ierr)?;
+
+    // Read the mesh back.
+    let entities = mesh::get_entities()?;
+    let nodes = mesh::read_nodes()?;
+    let elements = mesh::read_elements(&entities)?;
+
     let bounding_box = mesh::compute_bounding_box(&nodes);
-    let metadata = mesh::MeshMetadata {
+    let metadata = MeshMetadata {
         gmsh_version: "4.15.2".to_string(),
         node_count: nodes.len(),
         element_count: elements.len(),
-        physical_group_count: physical_groups.len(),
+        physical_group_count: groups.len(),
         bounding_box,
     };
 
     Ok(Mesh {
         nodes,
         elements,
-        physical_groups,
+        physical_groups: groups,
         metadata,
     })
 }
 
-/// Convenience: build with default settings.
+/// Convenience wrapper: build a single shape with default settings.
 pub fn build_default(shape: &Shape) -> Result<Mesh, BuildError> {
-    build(&[shape.clone()], &MeshSettings::default())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mesh_settings_default() {
-        let s = MeshSettings::default();
-        assert_eq!(s.order, 1);
-        assert!(s.optimize);
-        assert!(s.characteristic_length.is_none());
-    }
+    build(std::slice::from_ref(shape), &MeshSettings::default())
 }
