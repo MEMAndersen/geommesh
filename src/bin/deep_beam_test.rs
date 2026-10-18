@@ -1,9 +1,9 @@
-//! Simple test: single rectangle
+//! Mixed-dimension test: a rectangle with its boundary edges and a point.
 use geommesh::builder::{build, MeshSettings};
 use geommesh::geometry::Shape;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Single rectangle test ===\n");
+    println!("=== Mixed-dimension rectangle test ===\n");
 
     let rect = Shape::Rectangle {
         min: [0.0, 0.0],
@@ -31,7 +31,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shapes = vec![rect, left_edge, right_edge, center_point];
 
     println!("Shape tree:");
-    println!("  rect = Rectangle [(0,0) -> (5,4)]\n");
+    println!("  rect        = Rectangle [(0,0) -> (5,4)]");
+    println!("  left_edge   = Line [(0,0) -> (0,4)]");
+    println!("  right_edge  = Line [(5,0) -> (5,4)]");
+    println!("  center_point= Point (2.5, 4)");
 
     let settings = MeshSettings {
         characteristic_length: Some(0.5),
@@ -49,14 +52,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mesh.metadata.node_count, mesh.metadata.element_count, mesh.metadata.physical_group_count
     );
 
-    let group = mesh
-        .physical_group("rect")
-        .expect("rect group should exist");
-    println!(
-        "  'rect': dim={}, tag={}, entities={:?}",
-        group.dim, group.tag, group.entities
-    );
+    println!("\nStep 2: Verifying every shape survived into the mesh...");
 
-    println!("\n=== Test Complete ===");
+    // Every labeled shape must come back as a physical group of the right
+    // dimension, with mesh elements assigned to it.
+    let expected: [(&str, i32); 4] = [
+        ("rect", 2),
+        ("left_edge", 1),
+        ("right_edge", 1),
+        ("center_point", 0),
+    ];
+
+    let mut missing = Vec::new();
+    for (name, dim) in expected {
+        match mesh.physical_group(name) {
+            None => {
+                missing.push(name);
+                println!("  '{name}': MISSING");
+            }
+            Some(group) if group.dim != dim => {
+                missing.push(name);
+                println!(
+                    "  '{name}': WRONG DIMENSION dim={} (expected {dim})",
+                    group.dim
+                );
+            }
+            Some(group) => {
+                let elements = mesh.elements_in_group(name).unwrap_or_default();
+                if elements.is_empty() {
+                    missing.push(name);
+                    println!("  '{name}': dim={}, but no elements", group.dim);
+                } else {
+                    println!(
+                        "  '{name}': dim={}, entities={:?}, {} elements",
+                        group.dim,
+                        group.entities,
+                        elements.len()
+                    );
+                }
+            }
+        }
+    }
+
+    if !missing.is_empty() {
+        return Err(format!("shapes missing from the mesh: {}", missing.join(", ")).into());
+    }
+
+    println!(
+        "\n=== Test Complete: all {} shapes survived ===",
+        expected.len()
+    );
     Ok(())
 }
