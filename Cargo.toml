@@ -2,10 +2,14 @@
 name = "geommesh"
 version = "0.1.0"
 edition = "2021"
+description = "Geometry construction and meshing via Gmsh's C API"
+readme = "README.md"
+keywords = ["geometry", "mesh", "meshing", "gmsh", "FEA", "FEM"]
+categories = ["science"]
+exclude = ["/.cargo", "/.plans", "/.sandbox", "/xtask"]
 
 [dependencies]
-
-[build-dependencies]
+libloading = "0.8"
 
 [[bin]]
 name = "prototype"
@@ -20,3 +24,4 @@ name = "deep_beam_test"
 path = "src/bin/deep_beam_test.rs"
 
 [workspace]
+members = ["xtask"]

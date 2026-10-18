@@ -57,8 +57,17 @@ pub struct GmshContext {
 }
 
 impl GmshContext {
-    /// Initialize the Gmsh API, unless it is already initialized.
-    pub fn new() -> Result<Self, MeshError> {
+    /// Load the Gmsh shared library if needed, then initialize the Gmsh API
+    /// (unless it is already initialized).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BuildError::GmshLibrary`] when no Gmsh shared library can
+    /// be found or loaded; the error lists everywhere that was searched. See
+    /// [`ffi::GmshLibraryError`] for the search order and environment
+    /// variables.
+    pub fn new() -> Result<Self, BuildError> {
+        ffi::ensure_loaded()?;
         let mut ierr: c_int = 0;
         let initialized = unsafe { ffi::gmshIsInitialized(&mut ierr) };
         check(ierr)?;
@@ -122,6 +131,11 @@ impl Drop for GmshContext {
 /// Error type for the builder.
 #[derive(Debug)]
 pub enum BuildError {
+    /// The Gmsh shared library could not be found, loaded, or bound to.
+    ///
+    /// Carries the full search report so the caller can see which locations
+    /// were tried.
+    GmshLibrary(ffi::GmshLibraryError),
     /// A Gmsh C API call failed.
     Ffi(FfiError),
     /// Reading back the generated mesh failed.
@@ -137,6 +151,7 @@ pub enum BuildError {
 impl std::fmt::Display for BuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            BuildError::GmshLibrary(e) => write!(f, "{e}"),
             BuildError::Ffi(e) => write!(f, "{e}"),
             BuildError::Mesh(e) => write!(f, "{e}"),
             BuildError::Geometry(e) => write!(f, "{e}"),
@@ -147,6 +162,12 @@ impl std::fmt::Display for BuildError {
 }
 
 impl std::error::Error for BuildError {}
+
+impl From<ffi::GmshLibraryError> for BuildError {
+    fn from(e: ffi::GmshLibraryError) -> Self {
+        BuildError::GmshLibrary(e)
+    }
+}
 
 impl From<FfiError> for BuildError {
     fn from(e: FfiError) -> Self {

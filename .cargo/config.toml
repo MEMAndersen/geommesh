@@ -1,0 +1,13 @@
+[alias]
+xtask = "run --package xtask --"
+
+[env]
+# Repository-side development helper (not part of the published crate): when
+# the environment does not already select a Gmsh library, point the runtime
+# search at the repo-local `.sandbox/` directory, so integration tests and
+# example binaries pick up an SDK unpacked there (`cargo xtask fetch-gmsh`).
+#
+# An explicit `GEOMESH_GMSH_LIBRARY` or `GEOMESH_GMSH_DIR` in the process
+# environment still takes precedence. If `.sandbox/` does not exist, tests
+# fail with a detailed error listing every location that was searched.
+GEOMESH_GMSH_DIR = { value = ".sandbox", relative = true }
