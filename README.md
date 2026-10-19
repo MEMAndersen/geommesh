@@ -110,3 +110,16 @@ any Gmsh SDK into `.sandbox/` manually — the search goes a few levels deep.
 
 `cargo doc --no-deps` builds the API documentation; the `ffi` module documents
 the raw bindings and the loader contract.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this crate by you, as defined in the Apache-2.0 license, shall
+be dual licensed as above, without any additional terms or conditions.
